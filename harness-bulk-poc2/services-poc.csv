@@ -1,0 +1,7 @@
+service_ref,deployment_name,enabled
+svc_aisp_account_access_consents_channel_service,aisp-account-access-consents-channel-service,true
+svc_aisp_account_request_data_api,aisp-account-request-data-api,true
+svc_aisp_agreements_channel_service,aisp-agreements-channel-service,true
+svc_aisp_balances_channel_service,aisp-balances-channel-service,true
+svc_aisp_beneficiaries_channel_service,aisp-beneficiaries-channel-service,true
+

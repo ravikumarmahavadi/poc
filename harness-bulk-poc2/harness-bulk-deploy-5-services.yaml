@@ -1,0 +1,155 @@
+pipeline:
+  name: gcp2.0-cd-bulk-deploy-poc-5-catalog
+  identifier: gcp20cdbulkdeploypoc5catalog
+  projectIdentifier: obl11
+  orgIdentifier: cse2
+  tags:
+    owner: ravi-kumar
+    purpose: catalog-driven-bulk-deployment-poc
+  stages:
+    - stage:
+        name: Load Service Catalog
+        identifier: Load_Service_Catalog
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Read and Validate CSV
+                  identifier: Read_and_Validate_CSV
+                  type: ShellScript
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          set -eu
+                          catalog_file="/tmp/bulk-services-<+pipeline.executionId>.csv"
+                          curl -fsSL "<+pipeline.variables.service_catalog_url>" -o "$catalog_file"
+                          header="$(head -n 1 "$catalog_file" | tr -d '\r')"
+                          if [ "$header" != "service_ref,deployment_name,enabled" ]; then
+                            echo "Invalid CSV header: $header"
+                            echo "Expected: service_ref,deployment_name,enabled"
+                            exit 1
+                          fi
+                          deployment_items="$(awk -F',' \
+                            -v prefix='<+pipeline.variables.gar_package_prefix>' \
+                            -v version='<+pipeline.variables.artifact_version>' '
+                              NR > 1 {
+                                gsub(/\r/, "", $0)
+                                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
+                                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+                                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
+                                if (tolower($3) == "true") {
+                                  if ($1 == "" || $2 == "") {
+                                    print "Invalid enabled row at CSV line " NR > "/dev/stderr"
+                                    exit 2
+                                  }
+                                  item=$1 "|" prefix "/ob-" $2 "|" version
+                                  output=(output == "" ? item : output "," item)
+                                  count++
+                                }
+                              }
+                              END {
+                                if (count == 0) {
+                                  print "No enabled services in CSV" > "/dev/stderr"
+                                  exit 3
+                                }
+                                if (count > 5) {
+                                  print "POC safety limit exceeded: " count " enabled services; maximum is 5" > "/dev/stderr"
+                                  exit 4
+                                }
+                                print output
+                              }
+                            ' "$catalog_file")"
+                          echo "Validated enabled services: $(printf '%s' "$deployment_items" | awk -F',' '{print NF}')"
+                          export deployment_items
+                    environmentVariables: []
+                    outputVariables:
+                      - name: deployment_items
+                        type: String
+                        value: deployment_items
+        tags: {}
+    - stage:
+        name: Deploy Service
+        identifier: Deploy_Service
+        type: Deployment
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: <+repeat.item.split("\\|")[0]>
+            serviceInputs:
+              serviceDefinition:
+                type: Kubernetes
+                spec:
+                  artifacts:
+                    primary:
+                      primaryArtifactRef: RTL_SSV_DOCKER_RELEASE_GAR
+                      sources:
+                        - identifier: RTL_SSV_DOCKER_RELEASE_GAR
+                          type: GoogleArtifactRegistry
+                          spec:
+                            package: <+repeat.item.split("\\|")[1]>
+                            version: <+repeat.item.split("\\|")[2]>
+          environment:
+            environmentRef: gcp_rtl_pre
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: ns_53e680_pre_fix_europe_west2_caas
+          execution:
+            steps:
+              - step:
+                  name: Rollout Deployment
+                  identifier: rolloutDeployment
+                  type: K8sRollingDeploy
+                  timeout: 10m
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: false
+            rollbackSteps: []
+        variables:
+          - name: base_path
+            type: String
+            description: Common application base path
+            required: false
+            value: /cse2/obl11
+          - name: deploy_env
+            type: String
+            description: Target Helm environment selector
+            required: false
+            value: pre_pre
+        strategy:
+          repeat:
+            items: (<+pipeline.stages.Load_Service_Catalog.spec.execution.steps.Read_and_Validate_CSV.output.outputVariables.deployment_items>).split(",")
+            maxConcurrency: 2
+  variables:
+    - name: service_catalog_url
+      type: String
+      description: Raw URL of services-poc.csv stored in the configuration Git repository
+      required: true
+      value: REPLACE_ONCE_WITH_RAW_CSV_URL
+    - name: gar_package_prefix
+      type: String
+      description: Common path before the ob-service package name
+      required: false
+      value: cse2/obl11/al08218/images
+    - name: artifact_version
+      type: String
+      description: Common GAR tag used by the five-service POC
+      required: false
+      value: latest
+    - name: repo_branch
+      type: String
+      description: Helm/configuration repository branch
+      required: false
+      value: main
+
